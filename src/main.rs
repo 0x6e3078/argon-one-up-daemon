@@ -1,5 +1,6 @@
-// Argon ONE UP Laptop Daemon (Integrierte Version)
-// V5.3 - Erweiterte Daemon-Infos (Lid, Critical Action) und D-Bus Signalisierung
+// Argon ONE UP Laptop Daemon (Integrated Version)
+// V5.3 - Extended Daemon Info (Lid, Critical Action) and D-Bus Signaling
+// License: GPL-3.0
 
 use rppal::i2c::I2c;
 use rppal::gpio::{Gpio, Trigger};
@@ -8,7 +9,7 @@ use std::time::Duration;
 use std::sync::{Arc, RwLock};
 use zbus::{interface, connection::Builder};
 
-// Hardware-Konstanten für das Laptop-Modell
+// Hardware constants for the Laptop model
 const ADDR_BATTERY: u8 = 0x64;
 const PIN_SHUTDOWN: u8 = 4;
 const PIN_LID: u8 = 27;
@@ -60,12 +61,12 @@ impl UPowerManager {
 
     #[zbus(property)]
     fn lid_is_present(&self) -> bool {
-        true // Es ist ein Laptop, also ist ein Deckel vorhanden
+        true
     }
 
     #[zbus(property)]
     fn critical_action(&self) -> String {
-        "PowerOff".to_string() // Standard-Aktion bei kritischem Akkustand
+        "PowerOff".to_string()
     }
 }
 
@@ -88,12 +89,18 @@ impl ArgonBattery {
 
     #[zbus(property)]
     fn energy(&self) -> f64 {
-        self.state.read().unwrap().capacity * 0.3
+        // Based on 55.21 Wh battery (4780 mAh)
+        self.state.read().unwrap().capacity * 0.5521
     }
 
     #[zbus(property)]
     fn energy_full(&self) -> f64 {
-        30.0
+        55.21
+    }
+
+    #[zbus(property)]
+    fn energy_full_design(&self) -> f64 {
+        55.21
     }
 
     #[zbus(property)]
@@ -129,7 +136,7 @@ struct HardwareManager {
 
 impl HardwareManager {
     fn new() -> Self {
-        let i2c = I2c::with_bus(1).expect("I2C Bus 1 konnte nicht geöffnet werden");
+        let i2c = I2c::with_bus(1).expect("Could not open I2C Bus 1");
         HardwareManager { i2c }
     }
 
@@ -170,20 +177,20 @@ impl HardwareManager {
             voltage,
             state,
             ac_present,
-            lid_closed: lid_is_low, // Deckel ist zu, wenn Pin LOW ist
+            lid_closed: lid_is_low,
         })
     }
 }
 
 #[tokio::main]
 async fn main() -> zbus::Result<()> {
-    println!("--- Argon ONE UP Rust Manager (V5.3 Full Daemon Info) ---");
+    println!("--- Argon ONE UP Rust Manager (V5.3 International) ---");
 
-    let gpio = Gpio::new().expect("GPIO Fehler");
+    let gpio = Gpio::new().expect("GPIO Error");
     let mut hw = HardwareManager::new();
     let lid_pin = gpio.get(PIN_LID).unwrap().into_input_pullup();
 
-    println!("Initialisiere Hardware-Status...");
+    println!("Initializing hardware status...");
     let initial_state = loop {
         if let Some(state) = hw.update_status(lid_pin.is_low()) {
             break state;
@@ -212,9 +219,9 @@ async fn main() -> zbus::Result<()> {
         .interface::<_, UPowerManager>("/org/freedesktop/UPower")
         .await?;
 
-    // GPIO Thread für Shutdown Button
+    // GPIO thread for Shutdown Button
     thread::spawn(move || {
-        let gpio_btn = Gpio::new().expect("GPIO Fehler");
+        let gpio_btn = Gpio::new().expect("GPIO Error");
         let mut shutdown_pin = gpio_btn.get(PIN_SHUTDOWN).unwrap().into_input_pullup();
         let _ = shutdown_pin.set_interrupt(Trigger::FallingEdge, Some(Duration::from_millis(10)));
 
@@ -226,13 +233,13 @@ async fn main() -> zbus::Result<()> {
                         dur += 1;
                         thread::sleep(Duration::from_millis(100));
                     }
-                    if dur >= 30 { println!("Shutdown-Aktion ausgelöst!"); }
+                    if dur >= 30 { println!("Shutdown triggered!"); }
                 }
             }
         }
     });
 
-    // Haupt-Loop für Hardware-Polling und D-Bus Signale
+    // Main loop for hardware polling and D-Bus signals
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
 
@@ -257,14 +264,13 @@ async fn main() -> zbus::Result<()> {
                 let mut last_w = last_broadcast_state.write().unwrap();
                 *last_w = new_state;
 
-                // Signale für Batterie-Gerät
                 let bat_ctx = battery_iface.signal_context();
                 let bat_inst = battery_iface.get().await;
                 let _ = bat_inst.percentage_changed(bat_ctx).await;
                 let _ = bat_inst.state_changed(bat_ctx).await;
                 let _ = bat_inst.voltage_changed(bat_ctx).await;
+                let _ = bat_inst.energy_changed(bat_ctx).await;
 
-                // Signale für den Daemon-Status (on-battery, lid-is-closed)
                 let mgr_ctx = manager_iface.signal_context();
                 let mgr_inst = manager_iface.get().await;
                 let _ = mgr_inst.on_battery_changed(mgr_ctx).await;
@@ -272,7 +278,7 @@ async fn main() -> zbus::Result<()> {
 
                 println!("[EVENT] Cap: {}% | AC: {} | LidClosed: {}",
                     new_state.capacity,
-                    if new_state.ac_present { "JA" } else { "NEIN" },
+                    if new_state.ac_present { "YES" } else { "NO" },
                     new_state.lid_closed
                 );
             }
