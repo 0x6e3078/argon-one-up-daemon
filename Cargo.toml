@@ -1,0 +1,10 @@
+[package]
+name = "argon-one-up-daemon"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rppal = "0.22.1"
+zbus = "4.3"
+tokio = { version = "1.0", features = ["full"] }
+futures-util = "0.3"

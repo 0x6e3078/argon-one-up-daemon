@@ -1,0 +1,13 @@
+[Unit]
+Description=Argon ONE UP Laptop Battery and Power Manager
+After=dbus.service
+Requires=dbus.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/argon-one-up-daemon
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
