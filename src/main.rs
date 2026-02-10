@@ -1,5 +1,5 @@
 // Argon ONE UP Laptop Daemon (Integrated Version)
-// V6.4 - Fixed AC detection (Voltage-based) and CW2217B native current registers
+// V6.5 - Fixed AC detection and CW2217B native current registers
 // License: GPL-3.0
 
 use rppal::i2c::I2c;
@@ -11,19 +11,30 @@ use std::env;
 use zbus::{interface, connection::Builder};
 
 // Hardware constants for the Argon ONE UP (Laptop Model)
+const R_SENSE: f64 = 10.0;
+const PIN_LID: u8 = 27;
+
 // IC: CellWise CW2217B (CW2217BAAD)
 const ADDR_BATTERY: u8 = 0x64;
 const REG_CONTROL: u8 = 0x01;
 const REG_ICSTATE: u8 = 0x03;
 const PIN_SHUTDOWN: u8 = 4;
-const PIN_LID: u8 = 27;
+const VCELL_H: u8 = 0x02;
+const VCELL_L: u8 = 0x03;
+const SOC_H: u8 = 0x04;
+const SOC_L: u8 = 0x05;
+const TEMP: u8 = 0x06;
+const CURRENT_H: u8 = 0x0E;
+const CURRENT_L: u8 = 0x0F;
+
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct BatteryState {
-    capacity: f64,
+    soc: f64,
     voltage: f64,
-    current: f64,   // Amperes (A)
-    power: f64,     // Watts (W)
+    current: f64,
+    temperature: f64,
+    power: f64,
     state: u32,     // 1=Charging, 2=Discharging, 4=Full
     ac_present: bool,
     lid_closed: bool,
@@ -85,7 +96,7 @@ struct ArgonBattery {
 impl ArgonBattery {
     #[zbus(property)]
     fn percentage(&self) -> f64 {
-        self.state.read().unwrap().capacity
+        self.state.read().unwrap().soc
     }
 
     #[zbus(property)]
@@ -95,7 +106,7 @@ impl ArgonBattery {
 
     #[zbus(property)]
     fn energy(&self) -> f64 {
-        self.state.read().unwrap().capacity * 0.5521
+        self.state.read().unwrap().soc * 0.5521
     }
 
     #[zbus(property)]
@@ -131,7 +142,7 @@ impl ArgonBattery {
     fn technology(&self) -> u32 { 1 } // 1 = Li-ion
 
     #[zbus(property)]
-    fn model(&self) -> String { "Argon ONE UP (CW2217B)".to_string() }
+    fn model(&self) -> String { "Argon ONE UP".to_string() }
 
     #[zbus(property)]
     fn vendor(&self) -> String { "Argon40".to_string() }
@@ -187,33 +198,35 @@ impl HardwareManager {
     }
 
     fn update_status(&mut self, lid_is_low: bool) -> Option<BatteryState> {
-        // Read native registers: 0x02 (Voltage), 0x04 (SOC), 0x0E/0x0F (Current)
-        let v_raw = self.read_byte(0x02);
-        let s_raw = self.read_byte(0x03);
-        let c_raw = self.read_byte(0x04);
-        let i_raw_high = self.read_byte(0x0E); // Native CW2217B current register
-        let i_raw_low = self.read_byte(0x0F);
 
-        if (v_raw == 255 || v_raw == 0) && (c_raw == 255 || c_raw == 0) {
+
+        let v_raw = self.read_byte(VCELL_H);
+        let s_raw = self.read_byte(VCELL_L);
+        let soc_raw_high = self.read_byte(SOC_H);
+        let soc_raw_low = self.read_byte(SOC_L);
+        let temperature_raw = self.read_byte(TEMP);
+        let current_raw_high = self.read_byte(CURRENT_H);
+        let current_raw_low = self.read_byte(CURRENT_L);
+
+        if (v_raw == 255 || v_raw == 0) && (soc_raw_high == 255 || soc_raw_high == 0) {
             return None;
         }
 
         let voltage = v_raw as f64 * 0.24;
-        let capacity = if c_raw > 100 { 100.0 } else { c_raw as f64 };
+        let soc = if soc_raw_high > 100 { 100.0 } else { soc_raw_high as f64 };
 
         // Process Current (Signed 16-bit integer)
-        let raw_i_val = (((i_raw_high as u16) << 8) | (i_raw_low as u16)) as i16;
+        let raw_current = (((current_raw_high as u16) << 8) | (current_raw_low as u16)) as i16;
 
+        let temperature = (temperature_raw * 2) as f64 / 10.0;
         // CW2217B Current Calculation:
-        // Divisor of 2000.0 is common for units in mA/5.
-        // If the value is still too high/low, we will adjust the sense resistor factor.
-        let current = raw_i_val as f64 / 2000.0;
+
+        let current = (52.4 * raw_current as f64 ) / (32768.0 * R_SENSE);
+        // let current = raw_current as f64 / 4000.0;
         let power = (voltage * current).abs();
 
-        // AC DETECTION LOGIC (REVERTED TO VOLTAGE):
-        // Bit 7 was tracking the backlight, making it unreliable.
-        // For 3S systems, a voltage > 13.0V is a definitive indicator of AC/Charging power.
-        let raw_ac = voltage > 13.0;
+        // AC DETECTION LOGIC:
+        let raw_ac = current > 0.0;
 
         // Debounce AC detection
         self.ac_history.push(raw_ac);
@@ -224,23 +237,24 @@ impl HardwareManager {
             2 // Discharging
         } else if current > 0.05 {
             1 // Charging
-        } else if capacity >= 98.0 {
+        } else if soc >= 98.0 {
             4 // Full
         } else {
             1 // Charging Fallback
         };
 
         if self.debug {
-            println!("[DEBUG] CW2217B -> V: {:.2}V | I: {:.3}A | P: {:.2}W | SOC: {:.1}% | AC: {} | Lid: {}",
-                     voltage, current, power, capacity,
+            println!("[DEBUG] CW2217B -> V: {:.2}V | I: {:.3}A | P: {:.2}W | SOC: {:.1}% | Temperature: {:.4} | AC: {} | Lid: {}",
+                     voltage, current, power, soc, temperature,
                      if ac_present { "YES" } else { "NO" },
                      if lid_is_low { "CLOSED" } else { "OPEN" });
         }
 
         Some(BatteryState {
-            capacity,
+            soc,
             voltage,
             current,
+            temperature,
             power,
             state,
             ac_present,
@@ -326,7 +340,7 @@ async fn main() -> zbus::Result<()> {
                 if new_state.state != last.state ||
                    new_state.ac_present != last.ac_present ||
                    new_state.lid_closed != last.lid_closed ||
-                   (new_state.capacity - last.capacity).abs() > 0.5 ||
+                   (new_state.soc - last.soc).abs() > 0.5 ||
                    (new_state.power - last.power).abs() > 0.05
                 {
                     changed = true;
@@ -352,7 +366,7 @@ async fn main() -> zbus::Result<()> {
                 let _ = mgr_inst.lid_is_closed_changed(mgr_ctx).await;
 
                 println!("[EVENT] SOC: {}% | P: {:.2}W | AC: {} | State: {}",
-                    new_state.capacity,
+                    new_state.soc,
                     new_state.power,
                     if new_state.ac_present { "YES" } else { "NO" },
                     match new_state.state { 1 => "Charging", 2 => "Discharging", 4 => "Full", _ => "Unknown" }
