@@ -1,5 +1,5 @@
-// Argon ONE UP Laptop Daemon (Integrated Version)
-// V6.5 - Fixed AC detection and CW2217B native current registers
+// Argon ONE UP Laptop Daemon
+// V6.6 - Fixed CW2217B registers adresses
 // License: GPL-3.0
 
 use rppal::i2c::I2c;
@@ -16,16 +16,23 @@ const PIN_LID: u8 = 27;
 
 // IC: CellWise CW2217B (CW2217BAAD)
 const ADDR_BATTERY: u8 = 0x64;
-const REG_CONTROL: u8 = 0x01;
-const REG_ICSTATE: u8 = 0x03;
+
+const REG_VCELL_H: u8 = 0x02;
+const REG_VCELL_L: u8 = 0x03;
+const REG_SOC_H: u8 = 0x04;
+const REG_SOC_L: u8 = 0x05;
+
+const REG_TEMP: u8 = 0x06;
+
+const REG_CONTROL: u8 = 0x08;
+
+const REG_SOCALERT: u8 = 0x0B;
+const REG_CURRENT_H: u8 = 0x0E;
+const REG_CURRENT_L: u8 = 0x0F;
+const REG_ICSTATE: u8 = 0xA7;
+
 const PIN_SHUTDOWN: u8 = 4;
-const VCELL_H: u8 = 0x02;
-const VCELL_L: u8 = 0x03;
-const SOC_H: u8 = 0x04;
-const SOC_L: u8 = 0x05;
-const TEMP: u8 = 0x06;
-const CURRENT_H: u8 = 0x0E;
-const CURRENT_L: u8 = 0x0F;
+
 
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -178,7 +185,7 @@ impl HardwareManager {
             let mut wait_secs = 5;
             while wait_secs > 0 {
                 let status = self.read_byte(REG_ICSTATE);
-                if status != 255 && status != 0 && (status & 0x0C) != 0 {
+                if status != 255 && status != 0 {
                     if self.debug { println!("[DEBUG] CW2217B Active. State: 0x{:02X}", status); }
                     return true;
                 }
@@ -190,23 +197,33 @@ impl HardwareManager {
     }
 
     fn read_byte(&mut self, reg: u8) -> u8 {
-        let mut res = [0u8; 1];
-        if self.i2c.write(&[reg]).is_err() { return 255; }
-        thread::sleep(Duration::from_millis(20));
-        if self.i2c.read(&mut res).is_err() { return 255; }
-        res[0]
+        self.i2c.smbus_read_byte(reg).unwrap()
+    }
+
+    fn get_status(&mut self) -> u8 {
+        let stat = self.read_byte(REG_CONTROL);
+        if stat != 0 {
+            println!("battery-status Inactive 0x{:02X}", stat);
+            return 2
+        }
+        let soc_alert = self.read_byte(REG_SOCALERT);
+        if soc_alert & 0x80 == 0 {
+            println!("battery-status Profile not ready 0x{:02X}", soc_alert);
+            return 3
+        }
+        return 0
     }
 
     fn update_status(&mut self, lid_is_low: bool) -> Option<BatteryState> {
 
 
-        let v_raw = self.read_byte(VCELL_H);
-        let s_raw = self.read_byte(VCELL_L);
-        let soc_raw_high = self.read_byte(SOC_H);
-        let soc_raw_low = self.read_byte(SOC_L);
-        let temperature_raw = self.read_byte(TEMP);
-        let current_raw_high = self.read_byte(CURRENT_H);
-        let current_raw_low = self.read_byte(CURRENT_L);
+        let v_raw = self.read_byte(REG_VCELL_H);
+        let _s_raw = self.read_byte(REG_VCELL_L);
+        let soc_raw_high = self.read_byte(REG_SOC_H);
+        let _soc_raw_low = self.read_byte(REG_SOC_L);
+        let temperature_raw = self.read_byte(REG_TEMP);
+        let current_raw_high = self.read_byte(REG_CURRENT_H);
+        let current_raw_low = self.read_byte(REG_CURRENT_L);
 
         if (v_raw == 255 || v_raw == 0) && (soc_raw_high == 255 || soc_raw_high == 0) {
             return None;
@@ -268,14 +285,14 @@ async fn main() -> zbus::Result<()> {
     let args: Vec<String> = env::args().collect();
     let debug_mode = args.iter().any(|arg| arg == "--debug" || arg == "-d");
 
-    println!("--- Argon ONE UP Rust Manager (V6.4 Stable) ---");
+    println!("--- Argon ONE UP Rust Manager (V6.6) ---");
 
     let gpio = Gpio::new().expect("GPIO Error");
     let mut hw = HardwareManager::new(debug_mode);
 
     thread::sleep(Duration::from_millis(500));
-    if !hw.init() {
-        println!("[WARNING] Hardware activation sequence timed out.");
+    if hw.get_status() !=0 {
+        if !hw.init() {println!("[WARNING] Hardware activation sequence timed out.");};
     }
 
     let lid_pin = gpio.get(PIN_LID).unwrap().into_input_pullup();
@@ -285,7 +302,7 @@ async fn main() -> zbus::Result<()> {
             println!("Battery controller synchronized.");
             break state;
         }
-        hw.init();
+        // hw.init();
         thread::sleep(Duration::from_secs(2));
     };
 
