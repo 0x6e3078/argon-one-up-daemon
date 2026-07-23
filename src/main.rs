@@ -11,6 +11,9 @@ use std::time::Duration;
 use zbus::{interface, connection::Builder};
 
 
+const DAEMON_VERSION: &str = env!("DAEMON_VERSION");
+
+
 // Hardware constants for the Argon ONE UP (Laptop Model)
 const R_SENSE: f64 = 10.0;
 const ENERGY_FULL_WH: f64 = 55.21;
@@ -82,6 +85,11 @@ impl UPowerManager {
     }
 
     #[zbus(property)]
+    fn daemon_version(&self) -> String {
+        DAEMON_VERSION.to_string()
+    }
+
+    #[zbus(property)]
     fn native_path(&self) -> String {
         "argon-one-up".to_string()
     }
@@ -122,11 +130,6 @@ impl UPowerManager {
     #[zbus(property)]
     fn has_statistics(&self) -> bool {
         false
-    }
-
-    #[zbus(property)]
-    fn daemon_version(&self) -> String {
-        "0.99.11".to_string()
     }
 
     #[zbus(property)]
@@ -246,10 +249,14 @@ impl HardwareManager {
         }
     }
 
-    fn init(&mut self) -> bool {
+    fn debug_print(&self, args: std::fmt::Arguments) {
         if self.debug {
-            println!("[DEBUG] Initiating CW2217B controller activation...");
+            println!("{}", args);
         }
+    }
+
+    fn init(&mut self) -> bool {
+        self.debug_print(format_args!("[DEBUG] Initiating CW2217B controller activation..."));
 
         let mut retries = 3;
 
@@ -275,9 +282,7 @@ impl HardwareManager {
             while wait_secs > 0 {
                 if let Some(status) = self.read_byte(REG_ICSTATE) {
                     if status != 255 && status != 0 {
-                        if self.debug {
-                            println!("[DEBUG] CW2217B Active. State: 0x{:02X}", status);
-                        }
+                        self.debug_print(format_args!("[DEBUG] CW2217B Active. State: 0x{:02X}", status));
                         return true;
                     }
                 }
@@ -294,15 +299,15 @@ impl HardwareManager {
         match self.read_byte(REG_SOCALERT) {
             Some(soc_alert) => {
                 let profile_loaded = (soc_alert & 0x80) != 0;
-                println!(
+                self.debug_print(format_args!(
                     "battery-profile SOC_ALERT=0x{:02X} UPDATE_FLAG={}",
                     soc_alert,
                     if profile_loaded { "SET (profile loaded)" } else { "CLEAR (no profile)" }
-                );
+                ));
                 profile_loaded
             }
             None => {
-                println!("battery-profile Unable to read SOC_ALERT register");
+                self.debug_print(format_args!("battery-profile Unable to read SOC_ALERT register"));
                 false
             }
         }
@@ -312,9 +317,7 @@ impl HardwareManager {
         match self.i2c.smbus_read_byte(reg) {
             Ok(value) => Some(value),
             Err(err) => {
-                if self.debug {
-                    eprintln!("[ERROR] I2C read failed at register 0x{:02X}: {}", reg, err);
-                }
+                self.debug_print(format_args!("[ERROR] I2C read failed at register 0x{:02X}: {}", reg, err));
                 None
             }
         }
@@ -324,26 +327,26 @@ impl HardwareManager {
         let stat = match self.read_byte(REG_CONTROL) {
             Some(value) => value,
             None => {
-                println!("battery-status Unable to read REG_CONTROL");
+                eprintln!("[ERROR] battery-status Unable to read REG_CONTROL");
                 return 1;
             }
         };
 
         if stat != 0 {
-            println!("battery-status Inactive 0x{:02X}", stat);
+            self.debug_print(format_args!("battery-status Inactive 0x{:02X}", stat));
             return 2;
         }
 
         let soc_alert = match self.read_byte(REG_SOCALERT) {
             Some(value) => value,
             None => {
-                println!("battery-status Unable to read REG_SOCALERT");
+                eprintln!("battery-status Unable to read REG_SOCALERT");
                 return 1;
             }
         };
 
         if soc_alert & 0x80 == 0 {
-            println!("battery-status Profile not ready 0x{:02X}", soc_alert);
+            self.debug_print(format_args!("battery-status Profile not ready 0x{:02X}", soc_alert));
             return 3;
         }
 
@@ -383,23 +386,21 @@ impl HardwareManager {
         let power = (voltage * current).abs();
 
         // Debug output of all raw values
-        if self.debug {
-            println!(
-                "[DEBUG] RAW REGS: V=0x{:02X}:0x{:02X} SOC=0x{:02X}:0x{:02X} T=0x{:02X} I=0x{:02X}:0x{:02X}",
-                v_raw_high, v_raw_low,
-                soc_raw_high, soc_raw_low,
-                temperature_raw,
-                current_raw_high, current_raw_low
-            );
-            println!(
-                "[DEBUG] CALC: V={:.3}V SOC={:.1}% T={:.1}°C I={:.3}A P={:.2}W",
-                voltage,
-                soc_raw,
-                temperature,
-                current,
-                power
-            );
-        }
+        self.debug_print(format_args!(
+            "[DEBUG] RAW REGS: V=0x{:02X}:0x{:02X} SOC=0x{:02X}:0x{:02X} T=0x{:02X} I=0x{:02X}:0x{:02X}",
+            v_raw_high, v_raw_low,
+            soc_raw_high, soc_raw_low,
+            temperature_raw,
+            current_raw_high, current_raw_low
+        ));
+        self.debug_print(format_args!(
+            "[DEBUG] CALC: V={:.3}V SOC={:.1}% T={:.1}°C I={:.3}A P={:.2}W",
+            voltage,
+            soc_raw,
+            temperature,
+            current,
+            power
+        ));
 
         // Plausibility check
         if !(2.5..=4.5).contains(&voltage) {
@@ -474,11 +475,8 @@ impl HardwareManager {
         })
     }
 
-    const REG_PROFILE_START: u8 = 0x10;
-    const PROFILE_SIZE: usize = 80;
-
     fn load_battery_profile(&mut self) -> bool {
-        println!("[INFO] Loading CW2217B battery profile...");
+        self.debug_print(format_args!("[INFO] Loading CW2217B battery profile..."));
 
         // Chip in Sleep
         if let Err(err) = self.i2c.write(&[REG_CONTROL, 0x30]) {
@@ -497,13 +495,11 @@ impl HardwareManager {
             eprintln!("[ERROR] Failed to write battery profile: {}", err);
             return false;
         }
-        if self.debug {
-            println!(
-                "[DEBUG] Wrote {} profile bytes starting at register 0x{:02X}",
-                PROFILE_DATALIST.len(),
-                REG_PROFILE_START
-            );
-        }
+        self.debug_print(format_args!(
+            "[DEBUG] Wrote {} profile bytes starting at register 0x{:02X}",
+            PROFILE_DATALIST.len(),
+            REG_PROFILE_START
+        ));
         // read back and verify the profile
         if !self.verify_battery_profile() {
             eprintln!("[ERROR] Battery profile verification failed.");
@@ -516,9 +512,7 @@ impl HardwareManager {
             return false;
         }
 
-        if self.debug {
-            println!("[INFO] Set UPDATE_FLAG (0xB0 -> SOC_ALERT)");
-        }
+        self.debug_print(format_args!("[INFO] Set UPDATE_FLAG (0xB0 -> SOC_ALERT)"));
 
         thread::sleep(Duration::from_millis(100));
 
@@ -540,27 +534,23 @@ impl HardwareManager {
 
         let flag_set = (soc_alert & 0x80) != 0;
 
-        println!(
+        self.debug_print(format_args!(
             "[INFO] Profile load verify: SOC_ALERT=0x{:02X} UPDATE_FLAG={}",
             soc_alert,
             if flag_set { "SET ✓" } else { "NOT SET ✗" }
-        );
+        ));
 
         if !flag_set {
             eprintln!("[ERROR] UPDATE_FLAG not set after profile load.");
             return false;
         }
 
-        if self.debug {
-            println!("[INFO] Battery profile loaded successfully!");
-        }
+        self.debug_print(format_args!("[INFO] Battery profile loaded successfully!"));
         true
     }
 
     fn verify_battery_profile(&mut self) -> bool {
-        if self.debug {
-            println!("[INFO] Verifying CW2217B battery profile...");
-        }
+        self.debug_print(format_args!("[INFO] Verifying CW2217B battery profile..."));
 
         for (i, expected) in PROFILE_DATALIST.iter().enumerate() {
             let reg = REG_PROFILE_START + i as u8;
@@ -584,9 +574,7 @@ impl HardwareManager {
             }
         }
 
-        if self.debug {
-            println!("[INFO] Battery profile verified successfully.");
-        }
+        self.debug_print(format_args!("[INFO] Battery profile verified successfully."));
         true
     }
 
@@ -597,7 +585,7 @@ async fn main() -> zbus::Result<()> {
     let args: Vec<String> = env::args().collect();
     let debug_mode = args.iter().any(|arg| arg == "--debug" || arg == "-d");
 
-    println!("--- Argon ONE UP Rust Manager (V6.6) ---");
+    println!("--- Argon ONE UP Rust Manager ({})) ---", DAEMON_VERSION);
 
     let gpio = Gpio::new().expect("GPIO Error");
     let mut hw = HardwareManager::new(debug_mode);
@@ -633,7 +621,7 @@ async fn main() -> zbus::Result<()> {
 
     let initial_state = loop {
         if let Some(state) = hw.update_status(lid_pin.is_low()) {
-            println!("Battery controller synchronized.");
+            hw.debug_print(format_args!("Battery controller synchronized."));
             break state;
         }
         // hw.init();
